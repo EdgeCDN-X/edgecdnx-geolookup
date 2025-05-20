@@ -12,7 +12,6 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/log"
-	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
 
 	"github.com/coredns/coredns/plugin/metadata"
@@ -23,10 +22,6 @@ import (
 
 	"github.com/miekg/dns"
 )
-
-// Define log to be a logger with the plugin name in it. This way we can just use log.Info and
-// friends to log.
-var pluginLog = clog.NewWithPlugin("edgecdnxgeolookup")
 
 // Example is an example plugin to show how to write a plugin.
 type EdgeCDNXGeolookup struct {

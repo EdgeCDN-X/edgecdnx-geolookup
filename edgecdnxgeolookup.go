@@ -97,7 +97,9 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 				return locationName, nil
 			}
 		}
-	} else {
+	}
+
+	if len(winners) == 1 {
 		return winners[0], nil
 	}
 

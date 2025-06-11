@@ -19,12 +19,17 @@ type NodeSpec struct {
 	Name   string   `yaml:"name"`
 	Caches []string `yaml:"caches"`
 	Ipv4   string   `yaml:"ipv4"`
-	Ipv6   string   `yaml:"ipv6"`
+	Ipv6   string   `yaml:"ipv6,omitempty"`
+}
+
+type GeolookupAtributeValueSpec struct {
+	Value  string `yaml:"value"`
+	Weight int    `yaml:"weight,omitempty"`
 }
 
 type GeoLookupAttributeSpec struct {
-	Weight int      `yaml:"weight"`
-	Values []string `yaml:"values"`
+	Weight int                          `yaml:"weight"`
+	Values []GeolookupAtributeValueSpec `yaml:"values"`
 }
 
 type GeolookupSpec struct {
@@ -34,8 +39,8 @@ type GeolookupSpec struct {
 
 type LocationSpec struct {
 	Name              string        `yaml:"name"`
-	FallbackLocations []string      `yaml:"fallback_locations"`
-	Geolookup         GeolookupSpec `yaml:"geolookup"`
+	FallbackLocations []string      `yaml:"fallbackLocations"`
+	Geolookup         GeolookupSpec `yaml:"geoLookup"`
 	Nodes             []NodeSpec    `yaml:"nodes"`
 }
 

@@ -51,7 +51,10 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 			if lookupFunc := metadata.ValueFunc(ctx, attrName); lookupFunc != nil {
 				if lookupValue := lookupFunc(); lookupValue != "" {
 					log.Debug(fmt.Sprintf("found attribute %s with value %s", attrName, lookupValue))
-					if slices.Contains(attribute.Values, lookupValue) {
+
+					if slices.ContainsFunc(attribute.Values, func(attr GeolookupAtributeValueSpec) bool {
+						return attr.Value == lookupValue
+					}) {
 						currScore, ok := locationScore[locationName]
 						if !ok {
 							currScore = 0
@@ -169,7 +172,6 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 		parsed := net.ParseIP(node.Ipv4)
 		res.A = parsed
 		m.Answer = append(m.Answer, res)
-
 	} else {
 		res := new(dns.AAAA)
 		res.Hdr = dns.RR_Header{Name: state.Name(), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 180}

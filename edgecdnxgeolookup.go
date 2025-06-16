@@ -47,7 +47,7 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 	locationScore := make(map[string]int)
 
 	for locationName, location := range e.Routing.Locations {
-		for attrName, attribute := range location.Location.Geolookup.Attributes {
+		for attrName, attribute := range location.Geolookup.Attributes {
 			if lookupFunc := metadata.ValueFunc(ctx, attrName); lookupFunc != nil {
 				if lookupValue := lookupFunc(); lookupValue != "" {
 					log.Debug(fmt.Sprintf("found attribute %s with value %s", attrName, lookupValue))
@@ -87,7 +87,7 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 
 		for _, locationName := range winners {
 			location := e.Routing.Locations[locationName]
-			totalWeigth = totalWeigth + location.Location.Geolookup.Weight
+			totalWeigth = totalWeigth + location.Geolookup.Weight
 		}
 
 		selector := (float64(totalWeigth) * randomNumber)
@@ -95,7 +95,7 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 		currentWeight := 0
 		for _, locationName := range winners {
 			location := e.Routing.Locations[locationName]
-			currentWeight += location.Location.Geolookup.Weight
+			currentWeight += location.Geolookup.Weight
 			if int(selector) <= currentWeight {
 				return locationName, nil
 			}
@@ -110,16 +110,16 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 }
 
 func (e EdgeCDNXGeolookup) ApplyHash(location *Location, hashInput string) (*NodeSpec, error) {
-	if len(location.Location.Nodes) == 0 {
-		return nil, fmt.Errorf("No nodes found in location %s", location.Location.Name)
+	if len(location.Nodes) == 0 {
+		return nil, fmt.Errorf("No nodes found in location %s", location.Name)
 	}
 	hash := md5.Sum([]byte(hashInput))
 
 	lastFourBytes := hash[len(hash)-4:]
 	hashValue := uint32(lastFourBytes[0])<<24 | uint32(lastFourBytes[1])<<16 | uint32(lastFourBytes[2])<<8 | uint32(lastFourBytes[3])
-	nodeIndex := int(hashValue % uint32(len(location.Location.Nodes)))
+	nodeIndex := int(hashValue % uint32(len(location.Nodes)))
 
-	return &location.Location.Nodes[nodeIndex], nil
+	return &location.Nodes[nodeIndex], nil
 }
 
 // ServeDNS implements the plugin.Handler interface. This method gets called when example is used
@@ -142,7 +142,7 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 	}
 
-	log.Debug(fmt.Sprintf("Routing to location: %s\n", location.Location.Name))
+	log.Debug(fmt.Sprintf("Routing to location: %s\n", location.Name))
 
 	node, err := e.ApplyHash(&location, state.Name())
 	if err != nil {

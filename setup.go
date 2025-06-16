@@ -1,15 +1,22 @@
 package edgecdnxgeolookup
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
-	"github.com/coredns/coredns/plugin/pkg/log"
-	"gopkg.in/yaml.v3"
+
+	"k8s.io/apimachinery/pkg/runtime"
+
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	clientsetscheme "k8s.io/client-go/kubernetes/scheme"
+
+	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
 )
 
 // init registers this plugin.
@@ -37,25 +44,31 @@ type GeolookupSpec struct {
 	Attributes map[string]GeoLookupAttributeSpec `yaml:"attributes"`
 }
 
-type LocationSpec struct {
+type Location struct {
 	Name              string        `yaml:"name"`
 	FallbackLocations []string      `yaml:"fallbackLocations"`
 	Geolookup         GeolookupSpec `yaml:"geoLookup"`
 	Nodes             []NodeSpec    `yaml:"nodes"`
 }
 
-type Location struct {
-	Location LocationSpec `yaml:"location"`
-}
-
 type EdgeCDNXGeolookupRouting struct {
-	FilePath  string
+	Namespace string
 	Locations map[string]Location
 }
 
 // setup is the function that gets called when the config parser see the token "example". Setup is responsible
 // for parsing any extra options the example plugin may have. The first token this function sees is "example".
 func setup(c *caddy.Controller) error {
+	scheme := runtime.NewScheme()
+	clientsetscheme.AddToScheme(scheme)
+	infrastructurev1alpha1.AddToScheme(scheme)
+
+	kubeconfig := ctrl.GetConfigOrDie()
+	kubeclient, err := client.New(kubeconfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return plugin.Error("edgecdnxprefixlist", fmt.Errorf("failed to create Kubernetes client: %w", err))
+	}
+
 	c.Next()
 
 	args := c.RemainingArgs()
@@ -64,35 +77,41 @@ func setup(c *caddy.Controller) error {
 	}
 
 	routing := &EdgeCDNXGeolookupRouting{
-		FilePath:  args[0],
+		Namespace: args[0],
 		Locations: make(map[string]Location),
 	}
 
-	files, err := filepath.Glob(filepath.Join(routing.FilePath, "*.yaml"))
-	if err != nil {
-		return plugin.Error("edgecdnxgeolookup", err)
+	locations := &infrastructurev1alpha1.LocationList{}
+	if err := kubeclient.List(context.TODO(), locations, &client.ListOptions{
+		Namespace: routing.Namespace,
+	}); err != nil {
+		return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to list locations: %w", err))
 	}
 
-	// Process each YAML file (e.g., validate or load into memory)
-	for _, file := range files {
-		// Example: Log the file name or perform further processing
+	for _, location := range locations.Items {
+		loc := &Location{}
+		loc.Name = location.Name
+		loc.FallbackLocations = location.Spec.FallbackLocations
 
-		content, err := os.ReadFile(file)
+		geolookup, err := json.Marshal(location.Spec.GeoLookup)
 		if err != nil {
-			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to read file %s: %w", file, err))
+			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to marshal geolookup spec: %w", err))
+		}
+		err = json.Unmarshal(geolookup, &loc.Geolookup)
+		if err != nil {
+			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to unmarshal geolookup spec: %w", err))
 		}
 
-		var data Location
-		if err := yaml.Unmarshal(content, &data); err != nil {
-			log.Error(fmt.Sprintf("unmarshal error %v", err))
-			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to parse YAML file %s: %w", file, err))
+		nodes, err := json.Marshal(location.Spec.Nodes)
+		if err != nil {
+			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to marshal nodes spec: %w", err))
+		}
+		err = json.Unmarshal(nodes, &loc.Nodes)
+		if err != nil {
+			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to unmarshal geolookup spec: %w", err))
 		}
 
-		if _, ok := routing.Locations[data.Location.Name]; ok {
-			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("duplicate location name %s in file %s", data.Location.Name, file))
-		}
-
-		routing.Locations[data.Location.Name] = data
+		routing.Locations[location.Name] = *loc
 	}
 
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.

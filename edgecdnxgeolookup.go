@@ -18,8 +18,6 @@ import (
 
 	"crypto/md5"
 
-	"slices"
-
 	"github.com/miekg/dns"
 )
 
@@ -50,19 +48,19 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 		for attrName, attribute := range location.Geolookup.Attributes {
 			if lookupFunc := metadata.ValueFunc(ctx, attrName); lookupFunc != nil {
 				if lookupValue := lookupFunc(); lookupValue != "" {
-					log.Debug(fmt.Sprintf("found attribute %s with value %s", attrName, lookupValue))
+					for _, attributeValue := range attribute.Values {
+						if attributeValue.Value == lookupValue {
+							log.Debug(fmt.Sprintf("found attribute %s with value %s", attrName, lookupValue))
 
-					if slices.ContainsFunc(attribute.Values, func(attr GeolookupAtributeValueSpec) bool {
-						return attr.Value == lookupValue
-					}) {
-						currScore, ok := locationScore[locationName]
-						if !ok {
-							currScore = 0
+							currScore, ok := locationScore[locationName]
+							if !ok {
+								currScore = 0
+							}
+							if currScore+attribute.Weight > maxValue {
+								maxValue = currScore + attribute.Weight + attributeValue.Weight
+							}
+							locationScore[locationName] = currScore + attribute.Weight + attributeValue.Weight
 						}
-						if currScore+attribute.Weight > maxValue {
-							maxValue = currScore + attribute.Weight
-						}
-						locationScore[locationName] = currScore + attribute.Weight
 					}
 				}
 			}

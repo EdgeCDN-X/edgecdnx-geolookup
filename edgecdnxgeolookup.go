@@ -178,11 +178,7 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 		m.Answer = append(m.Answer, res)
 	}
 
-	ok = state.SizeAndDo(m)
-	if !ok {
-		log.Debug(fmt.Sprintf("edgecdnxgeolookup: SizeAndDo error - %v", err))
-		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
-	}
+	state.SizeAndDo(m)
 	m = state.Scrub(m)
 	err = w.WriteMsg(m)
 

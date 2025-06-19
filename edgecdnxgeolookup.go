@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"slices"
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/log"
@@ -40,6 +41,26 @@ func (e EdgeCDNXGeolookup) IsPrefixRouted(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("Prefixlist metadata module not initialized")
 }
 
+func (e EdgeCDNXGeolookup) GetServiceCache(ctx context.Context) (string, error) {
+	if cacheFunc := metadata.ValueFunc(ctx, "edgecdnxservices/cache"); cacheFunc != nil {
+		if serviceCache := cacheFunc(); serviceCache != "" {
+			return serviceCache, nil
+		}
+		return "", fmt.Errorf("No service cache found")
+	}
+	return "", fmt.Errorf("Service cache metadata module not initialized")
+}
+
+func (e EdgeCDNXGeolookup) GetCustomer(ctx context.Context) (string, error) {
+	if customerFunc := metadata.ValueFunc(ctx, "edgecdnxservices/customer"); customerFunc != nil {
+		if customer := customerFunc(); customer != "" {
+			return customer, nil
+		}
+		return "", fmt.Errorf("Customer not found in meta")
+	}
+	return "", fmt.Errorf("Service customer metadata module not initialized")
+}
+
 func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error) {
 	maxValue := 0
 	locationScore := make(map[string]int)
@@ -50,7 +71,7 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 				if lookupValue := lookupFunc(); lookupValue != "" {
 					for _, attributeValue := range attribute.Values {
 						if attributeValue.Value == lookupValue {
-							log.Debug(fmt.Sprintf("found attribute %s with value %s", attrName, lookupValue))
+							log.Debug(fmt.Sprintf("edgecdnxgeolookup: found attribute %s with value %s", attrName, lookupValue))
 
 							currScore, ok := locationScore[locationName]
 							if !ok {
@@ -107,17 +128,33 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 	return "", errors.New("No Location Found")
 }
 
-func (e EdgeCDNXGeolookup) ApplyHash(location *Location, hashInput string) (*NodeSpec, error) {
-	if len(location.Nodes) == 0 {
-		return nil, fmt.Errorf("No nodes found in location %s", location.Name)
-	}
-	hash := md5.Sum([]byte(hashInput))
+func (e EdgeCDNXGeolookup) ApplyHash(location *Location, hashInput string, filters struct {
+	Cache string
+}) (NodeSpec, error) {
+	filteredNodes := make([]NodeSpec, 0)
+	for _, node := range location.Nodes {
+		matches := true
+		if filters.Cache != "" && !slices.Contains(node.Caches, filters.Cache) {
+			matches = false
+		}
 
+		if matches {
+			filteredNodes = append(filteredNodes, node)
+		}
+
+		//TODO: Handle HealthcCheck filters
+	}
+
+	if len(filteredNodes) == 0 {
+		return NodeSpec{}, fmt.Errorf("No nodes found in location %s with cache %s", location.Name, filters.Cache)
+	}
+
+	hash := md5.Sum([]byte(hashInput))
 	lastFourBytes := hash[len(hash)-4:]
 	hashValue := uint32(lastFourBytes[0])<<24 | uint32(lastFourBytes[1])<<16 | uint32(lastFourBytes[2])<<8 | uint32(lastFourBytes[3])
-	nodeIndex := int(hashValue % uint32(len(location.Nodes)))
+	nodeIndex := int(hashValue % uint32(len(filteredNodes)))
 
-	return &location.Nodes[nodeIndex], nil
+	return filteredNodes[nodeIndex], nil
 }
 
 // ServeDNS implements the plugin.Handler interface. This method gets called when example is used
@@ -140,12 +177,37 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 	}
 
-	log.Debug(fmt.Sprintf("Routing to location: %s\n", location.Name))
+	log.Debug(fmt.Sprintf("edgecdnxgeolookup: Routing to location: %s\n", location.Name))
 
-	node, err := e.ApplyHash(&location, state.Name())
+	cache, err := e.GetServiceCache(ctx)
+	if err != nil {
+		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Cache not found - %v", err))
+		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
+	}
+
+	node, err := e.ApplyHash(&location, state.Name(), struct{ Cache string }{cache})
 	if err != nil {
 		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Hashing error - %v", err))
-		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
+
+		for _, fbLoc := range location.FallbackLocations {
+			fbLocation, ok := e.Routing.Locations[fbLoc]
+			if !ok {
+				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Fallback location %s not found", fbLoc))
+				continue
+			}
+
+			node, err = e.ApplyHash(&fbLocation, state.Name(), struct{ Cache string }{cache})
+			if err == nil {
+				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Fallback to location %s successful", fbLoc))
+				break
+			}
+			log.Debug(fmt.Sprintf("edgecdnxgeolookup: Fallback to location %s failed - %v", fbLoc, err))
+		}
+
+		if err != nil {
+			log.Error(fmt.Sprintf("edgecdnxgeolookup: No nodes found for request %s - %v", state.Name(), err))
+			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
+		}
 	}
 
 	m := new(dns.Msg)

@@ -5,27 +5,28 @@ package edgecdnxgeolookup
 
 import (
 	"context"
+	"crypto/md5"
 	"errors"
 	"fmt"
 	"math/rand"
 	"net"
 	"slices"
+	"sync"
 
+	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
-
-	"github.com/coredns/coredns/plugin/metadata"
-
-	"crypto/md5"
-
 	"github.com/miekg/dns"
 )
 
 // Example is an example plugin to show how to write a plugin.
 type EdgeCDNXGeolookup struct {
-	Next    plugin.Handler
-	Routing *EdgeCDNXGeolookupRouting
+	Next           plugin.Handler
+	Locations      map[string]infrastructurev1alpha1.Location
+	Sync           *sync.RWMutex
+	InformerSynced func() bool
 }
 
 type EdgeCDNXGeolookupResponseWriter struct {
@@ -65,8 +66,8 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 	maxValue := 0
 	locationScore := make(map[string]int)
 
-	for locationName, location := range e.Routing.Locations {
-		for attrName, attribute := range location.Geolookup.Attributes {
+	for locationName, location := range e.Locations {
+		for attrName, attribute := range location.Spec.GeoLookup.Attributes {
 			if lookupFunc := metadata.ValueFunc(ctx, attrName); lookupFunc != nil {
 				if lookupValue := lookupFunc(); lookupValue != "" {
 					for _, attributeValue := range attribute.Values {
@@ -105,16 +106,16 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 		totalWeigth := 0
 
 		for _, locationName := range winners {
-			location := e.Routing.Locations[locationName]
-			totalWeigth = totalWeigth + location.Geolookup.Weight
+			location := e.Locations[locationName]
+			totalWeigth = totalWeigth + location.Spec.GeoLookup.Weight
 		}
 
 		selector := (float64(totalWeigth) * randomNumber)
 
 		currentWeight := 0
 		for _, locationName := range winners {
-			location := e.Routing.Locations[locationName]
-			currentWeight += location.Geolookup.Weight
+			location := e.Locations[locationName]
+			currentWeight += location.Spec.GeoLookup.Weight
 			if int(selector) <= currentWeight {
 				return locationName, nil
 			}
@@ -128,11 +129,11 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error)
 	return "", errors.New("No Location Found")
 }
 
-func (e EdgeCDNXGeolookup) ApplyHash(location *Location, hashInput string, filters struct {
+func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, hashInput string, filters struct {
 	Cache string
-}) (NodeSpec, error) {
-	filteredNodes := make([]NodeSpec, 0)
-	for _, node := range location.Nodes {
+}) (infrastructurev1alpha1.NodeSpec, error) {
+	filteredNodes := make([]infrastructurev1alpha1.NodeSpec, 0)
+	for _, node := range location.Spec.Nodes {
 		matches := true
 		if filters.Cache != "" && !slices.Contains(node.Caches, filters.Cache) {
 			matches = false
@@ -146,7 +147,7 @@ func (e EdgeCDNXGeolookup) ApplyHash(location *Location, hashInput string, filte
 	}
 
 	if len(filteredNodes) == 0 {
-		return NodeSpec{}, fmt.Errorf("No nodes found in location %s with cache %s", location.Name, filters.Cache)
+		return infrastructurev1alpha1.NodeSpec{}, fmt.Errorf("No nodes found in location %s with cache %s", location.Name, filters.Cache)
 	}
 
 	hash := md5.Sum([]byte(hashInput))
@@ -171,7 +172,10 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 		}
 	}
 
-	location, ok := e.Routing.Locations[locationName]
+	e.Sync.RLock()
+	defer e.Sync.RUnlock()
+
+	location, ok := e.Locations[locationName]
 	if !ok {
 		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Location not found - %v", err))
 		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
@@ -189,8 +193,8 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	if err != nil {
 		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Hashing error - %v", err))
 
-		for _, fbLoc := range location.FallbackLocations {
-			fbLocation, ok := e.Routing.Locations[fbLoc]
+		for _, fbLoc := range location.Spec.FallbackLocations {
+			fbLocation, ok := e.Locations[fbLoc]
 			if !ok {
 				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Fallback location %s not found", fbLoc))
 				continue

@@ -1,20 +1,25 @@
 package edgecdnxgeolookup
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/pkg/log"
 
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	kruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	clientsetscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/cache"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
 )
@@ -22,52 +27,14 @@ import (
 // init registers this plugin.
 func init() { plugin.Register("edgecdnxgeolookup", setup) }
 
-type NodeSpec struct {
-	Name   string   `yaml:"name"`
-	Caches []string `yaml:"caches"`
-	Ipv4   string   `yaml:"ipv4"`
-	Ipv6   string   `yaml:"ipv6,omitempty"`
-}
-
-type GeolookupAtributeValueSpec struct {
-	Value  string `yaml:"value"`
-	Weight int    `yaml:"weight,omitempty"`
-}
-
-type GeoLookupAttributeSpec struct {
-	Weight int                          `yaml:"weight"`
-	Values []GeolookupAtributeValueSpec `yaml:"values"`
-}
-
-type GeolookupSpec struct {
-	Weight     int                               `yaml:"weight"`
-	Attributes map[string]GeoLookupAttributeSpec `yaml:"attributes"`
-}
-
-type Location struct {
-	Name              string        `yaml:"name"`
-	FallbackLocations []string      `yaml:"fallbackLocations"`
-	Geolookup         GeolookupSpec `yaml:"geoLookup"`
-	Nodes             []NodeSpec    `yaml:"nodes"`
-}
-
-type EdgeCDNXGeolookupRouting struct {
-	Namespace string
-	Locations map[string]Location
-}
-
 // setup is the function that gets called when the config parser see the token "example". Setup is responsible
 // for parsing any extra options the example plugin may have. The first token this function sees is "example".
 func setup(c *caddy.Controller) error {
-	scheme := runtime.NewScheme()
+	scheme := kruntime.NewScheme()
 	clientsetscheme.AddToScheme(scheme)
 	infrastructurev1alpha1.AddToScheme(scheme)
 
 	kubeconfig := ctrl.GetConfigOrDie()
-	kubeclient, err := client.New(kubeconfig, client.Options{Scheme: scheme})
-	if err != nil {
-		return plugin.Error("edgecdnxprefixlist", fmt.Errorf("failed to create Kubernetes client: %w", err))
-	}
 
 	c.Next()
 
@@ -75,48 +42,117 @@ func setup(c *caddy.Controller) error {
 	if len(args) != 1 {
 		return plugin.Error("edgecdnxgeolookup", c.ArgErr())
 	}
+	namespace := args[0]
 
-	routing := &EdgeCDNXGeolookupRouting{
-		Namespace: args[0],
-		Locations: make(map[string]Location),
+	locations := make(map[string]infrastructurev1alpha1.Location)
+
+	clientSet, err := dynamic.NewForConfig(kubeconfig)
+	if err != nil {
+		return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to create dynamic client: %w", err))
 	}
 
-	locations := &infrastructurev1alpha1.LocationList{}
-	if err := kubeclient.List(context.TODO(), locations, &client.ListOptions{
-		Namespace: routing.Namespace,
-	}); err != nil {
-		return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to list locations: %w", err))
-	}
+	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 10*time.Minute, namespace, nil)
+	informer := fac.ForResource(schema.GroupVersionResource{
+		Group:    infrastructurev1alpha1.GroupVersion.Group,
+		Version:  infrastructurev1alpha1.GroupVersion.Version,
+		Resource: "locations",
+	}).Informer()
 
-	for _, location := range locations.Items {
-		loc := &Location{}
-		loc.Name = location.Name
-		loc.FallbackLocations = location.Spec.FallbackLocations
+	log.Infof("edgecdnxgeolookup: Starting informer for locations in namespace %s", namespace)
 
-		geolookup, err := json.Marshal(location.Spec.GeoLookup)
-		if err != nil {
-			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to marshal geolookup spec: %w", err))
-		}
-		err = json.Unmarshal(geolookup, &loc.Geolookup)
-		if err != nil {
-			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to unmarshal geolookup spec: %w", err))
-		}
+	sem := &sync.RWMutex{}
 
-		nodes, err := json.Marshal(location.Spec.Nodes)
-		if err != nil {
-			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to marshal nodes spec: %w", err))
-		}
-		err = json.Unmarshal(nodes, &loc.Nodes)
-		if err != nil {
-			return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to unmarshal geolookup spec: %w", err))
-		}
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			l_raw, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				log.Errorf("edgecdnxgeolookup: Failed to cast object to unstructured.Unstructured")
+				return
+			}
 
-		routing.Locations[location.Name] = *loc
-	}
+			temp, err := json.Marshal(l_raw.Object)
+			if err != nil {
+				log.Errorf("edgecdnxgeolookup: Failed to marshal location object: %v", err)
+				return
+			}
+			location := &infrastructurev1alpha1.Location{}
+			err = json.Unmarshal(temp, location)
+			if err != nil {
+				log.Errorf("edgecdnxgeolookup: Failed to unmarshal location object: %v", err)
+				return
+			}
+
+			sem.Lock()
+			defer sem.Unlock()
+			locations[location.Name] = *location
+			log.Infof("edgecdnxgeolookup: Added Location %s", location.Name)
+		},
+		UpdateFunc: func(oldObj, newObj any) {
+			s_new_raw, ok := newObj.(*unstructured.Unstructured)
+			if !ok {
+				log.Errorf("edgecdnxgeolookup: expected Location object, got %T", s_new_raw)
+				return
+			}
+			temp, err := json.Marshal(s_new_raw.Object)
+			if err != nil {
+				log.Errorf("edgecdnxgeolookup: failed to marshal Location object: %v", err)
+				return
+			}
+			location := &infrastructurev1alpha1.Location{}
+			err = json.Unmarshal(temp, location)
+			if err != nil {
+				log.Errorf("edgecdnxgeolookup: failed to unmarshal Location object: %v", err)
+				return
+			}
+			sem.Lock()
+			defer sem.Unlock()
+			loc, exists := locations[location.Name]
+			if !exists {
+				log.Errorf("edgecdnxgeolookup: Location %s not found in routing map", location.Name)
+				return
+			}
+			locations[location.Name] = loc
+			log.Infof("edgecdnxgeolookup: Updated Location %s", location.Name)
+		},
+		DeleteFunc: func(obj any) {
+			s_raw, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				log.Errorf("edgecdnxgeolookup: expected Location object, got %T", obj)
+				return
+			}
+
+			temp, err := json.Marshal(s_raw.Object)
+			if err != nil {
+				log.Errorf("edgecdnxgeolookup: failed to marshal Location object: %v", err)
+				return
+			}
+			location := &infrastructurev1alpha1.Location{}
+			err = json.Unmarshal(temp, location)
+			if err != nil {
+				log.Errorf("edgecdnxgeolookup: failed to unmarshal Location object: %v", err)
+				return
+			}
+
+			sem.Lock()
+			defer sem.Unlock()
+			delete(locations, location.Name)
+			log.Infof("edgecdnxgeolookup: Deleted Location %s", location.Name)
+		},
+	})
+
+	factoryCloseChan := make(chan struct{})
+	fac.Start(factoryCloseChan)
+
+	c.OnShutdown(func() error {
+		log.Infof("edgecdnxgeolookup: Shutting down informer")
+		close(factoryCloseChan)
+		fac.Shutdown()
+		return nil
+	})
 
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return EdgeCDNXGeolookup{Next: next, Routing: routing}
+		return EdgeCDNXGeolookup{Next: next, Locations: locations, Sync: sem, InformerSynced: informer.HasSynced}
 	})
 
 	// All OK, return a nil error.

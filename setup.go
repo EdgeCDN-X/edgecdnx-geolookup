@@ -22,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
+	consulapi "github.com/hashicorp/consul/api"
 )
 
 // init registers this plugin.
@@ -35,16 +36,37 @@ func setup(c *caddy.Controller) error {
 	infrastructurev1alpha1.AddToScheme(scheme)
 
 	kubeconfig := ctrl.GetConfigOrDie()
+	c.Next() // plugin name
 
-	c.Next()
-
-	args := c.RemainingArgs()
-	if len(args) != 1 {
-		return plugin.Error("edgecdnxgeolookup", c.ArgErr())
-	}
-	namespace := args[0]
-
+	var namespace, consulEndpoint string
+	consulcachettl := time.Second * 30
+	consulcachecleanupinterval := time.Minute * 1
 	locations := make(map[string]infrastructurev1alpha1.Location)
+
+	for c.NextBlock() {
+		val := c.Val()
+		args := c.RemainingArgs()
+		if val == "namespace" {
+			namespace = args[0]
+		}
+		if val == "consulEndpoint" {
+			consulEndpoint = args[0]
+		}
+		if val == "consulcachettl" {
+			persedttl, err := time.ParseDuration(args[0])
+			if err != nil {
+				return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to parse consulcachettl: %w", err))
+			}
+			consulcachettl = persedttl
+		}
+		if val == "consulcachecleanupinterval" {
+			parsedcleanup, err := time.ParseDuration(args[0])
+			if err != nil {
+				return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to parse consulcachecleanupinterval: %w", err))
+			}
+			consulcachecleanupinterval = parsedcleanup
+		}
+	}
 
 	clientSet, err := dynamic.NewForConfig(kubeconfig)
 	if err != nil {
@@ -143,16 +165,29 @@ func setup(c *caddy.Controller) error {
 	factoryCloseChan := make(chan struct{})
 	fac.Start(factoryCloseChan)
 
+	consulCache := NewCache[bool](consulcachettl, consulcachecleanupinterval)
+
 	c.OnShutdown(func() error {
 		log.Infof("edgecdnxgeolookup: Shutting down informer")
 		close(factoryCloseChan)
 		fac.Shutdown()
+		consulCache.Stop()
 		return nil
 	})
 
+	consulConfig := consulapi.DefaultConfig()
+	consulConfig.Address = consulEndpoint
+	consulClient, err := consulapi.NewClient(consulConfig)
+
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return EdgeCDNXGeolookup{Next: next, Locations: locations, Sync: sem, InformerSynced: informer.HasSynced}
+		return EdgeCDNXGeolookup{Next: next,
+			Locations:         locations,
+			Sync:              sem,
+			InformerSynced:    informer.HasSynced,
+			ConsulClient:      consulClient,
+			ConsulHealthCache: consulCache,
+		}
 	})
 
 	// All OK, return a nil error.

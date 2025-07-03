@@ -18,15 +18,18 @@ import (
 	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
+	consulapi "github.com/hashicorp/consul/api"
 	"github.com/miekg/dns"
 )
 
 // Example is an example plugin to show how to write a plugin.
 type EdgeCDNXGeolookup struct {
-	Next           plugin.Handler
-	Locations      map[string]infrastructurev1alpha1.Location
-	Sync           *sync.RWMutex
-	InformerSynced func() bool
+	Next              plugin.Handler
+	Locations         map[string]infrastructurev1alpha1.Location
+	Sync              *sync.RWMutex
+	InformerSynced    func() bool
+	ConsulClient      *consulapi.Client
+	ConsulHealthCache *Cache[bool]
 }
 
 type EdgeCDNXGeolookupResponseWriter struct {
@@ -142,20 +145,52 @@ func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, 
 		if matches {
 			filteredNodes = append(filteredNodes, node)
 		}
-
-		//TODO: Handle HealthcCheck filters
 	}
 
-	if len(filteredNodes) == 0 {
-		return infrastructurev1alpha1.NodeSpec{}, fmt.Errorf("No nodes found in location %s with cache %s", location.Name, filters.Cache)
+	for {
+		if len(filteredNodes) == 0 {
+			return infrastructurev1alpha1.NodeSpec{}, fmt.Errorf("No healthy nodes found in location %s with cache %s", location.Name, filters.Cache)
+		}
+
+		hash := md5.Sum([]byte(hashInput))
+		lastFourBytes := hash[len(hash)-4:]
+		hashValue := uint32(lastFourBytes[0])<<24 | uint32(lastFourBytes[1])<<16 | uint32(lastFourBytes[2])<<8 | uint32(lastFourBytes[3])
+		nodeIndex := int(hashValue % uint32(len(filteredNodes)))
+
+		nodeName := fmt.Sprintf("%s.%s.edgecdnx.com", filteredNodes[nodeIndex].Name, location.Name)
+
+		cacheService := fmt.Sprintf("cache-%s", nodeName)
+		healthy, ok := e.ConsulHealthCache.Get(cacheService)
+
+		if !ok {
+			health, _, err := e.ConsulClient.Health().Service(cacheService, "", false, &consulapi.QueryOptions{
+				UseCache:   true,
+				AllowStale: true,
+			})
+
+			if err != nil {
+				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Error fetching health for node %s - %v", nodeName, err))
+			}
+
+			healthy = true
+			for _, check := range health {
+				if check.Checks.AggregatedStatus() != consulapi.HealthPassing {
+					log.Debugf("edgecdnxgeolookup: Node %s is not healthy, trying next node", nodeName)
+					filteredNodes = slices.Delete(filteredNodes, nodeIndex, nodeIndex+1)
+					healthy = false
+				}
+			}
+			log.Debugf("edgecdnxgeolookup: cache miss: %s - %v", cacheService, healthy)
+			e.ConsulHealthCache.Set(cacheService, healthy)
+		} else {
+			log.Debugf("edgecdnxgeolookup: cache hit: %s - %v", cacheService, healthy)
+		}
+
+		if healthy {
+			log.Debugf("edgecdnxgeolookup: Node %s is healthy, returning node", nodeName)
+			return filteredNodes[nodeIndex], nil
+		}
 	}
-
-	hash := md5.Sum([]byte(hashInput))
-	lastFourBytes := hash[len(hash)-4:]
-	hashValue := uint32(lastFourBytes[0])<<24 | uint32(lastFourBytes[1])<<16 | uint32(lastFourBytes[2])<<8 | uint32(lastFourBytes[3])
-	nodeIndex := int(hashValue % uint32(len(filteredNodes)))
-
-	return filteredNodes[nodeIndex], nil
 }
 
 // ServeDNS implements the plugin.Handler interface. This method gets called when example is used

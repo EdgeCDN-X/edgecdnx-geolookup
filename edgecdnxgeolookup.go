@@ -30,6 +30,7 @@ type EdgeCDNXGeolookup struct {
 	InformerSynced    func() bool
 	ConsulClient      *consulapi.Client
 	ConsulHealthCache *Cache[bool]
+	Ttl               uint32
 }
 
 type EdgeCDNXGeolookupResponseWriter struct {
@@ -267,13 +268,13 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 
 	if srcIP.To4() != nil {
 		res := new(dns.A)
-		res.Hdr = dns.RR_Header{Name: state.Name(), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 180}
+		res.Hdr = dns.RR_Header{Name: state.Name(), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: e.Ttl}
 		parsed := net.ParseIP(node.Ipv4)
 		res.A = parsed
 		m.Answer = append(m.Answer, res)
 	} else {
 		res := new(dns.AAAA)
-		res.Hdr = dns.RR_Header{Name: state.Name(), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 180}
+		res.Hdr = dns.RR_Header{Name: state.Name(), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: e.Ttl}
 		parsed := net.ParseIP(node.Ipv6)
 		res.AAAA = parsed
 		m.Answer = append(m.Answer, res)

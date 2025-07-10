@@ -3,6 +3,7 @@ package edgecdnxgeolookup
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -41,6 +42,7 @@ func setup(c *caddy.Controller) error {
 	var namespace, consulEndpoint string
 	consulcachettl := time.Second * 30
 	consulcachecleanupinterval := time.Minute * 1
+	var recordttl uint32 = 60
 	locations := make(map[string]infrastructurev1alpha1.Location)
 
 	for c.NextBlock() {
@@ -65,6 +67,13 @@ func setup(c *caddy.Controller) error {
 				return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to parse consulcachecleanupinterval: %w", err))
 			}
 			consulcachecleanupinterval = parsedcleanup
+		}
+		if val == "recordttl" {
+			raw, err := strconv.Atoi(args[0])
+			if err != nil {
+				return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to parse recordttl: %w", err))
+			}
+			recordttl = uint32(raw)
 		}
 	}
 
@@ -187,6 +196,7 @@ func setup(c *caddy.Controller) error {
 			InformerSynced:    informer.HasSynced,
 			ConsulClient:      consulClient,
 			ConsulHealthCache: consulCache,
+			Ttl:               recordttl,
 		}
 	})
 

@@ -231,6 +231,7 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 
 		for _, fbLoc := range location.Spec.FallbackLocations {
 			fbLocation, ok := e.Locations[fbLoc]
+			log.Debug(fmt.Sprintf("edgecdnxgeolookup: Falling back to location %s", fbLoc))
 			if !ok {
 				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Fallback location %s not found", fbLoc))
 				continue

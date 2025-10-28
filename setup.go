@@ -137,12 +137,7 @@ func setup(c *caddy.Controller) error {
 			}
 			sem.Lock()
 			defer sem.Unlock()
-			loc, exists := locations[location.Name]
-			if !exists {
-				log.Errorf("edgecdnxgeolookup: Location %s not found in routing map", location.Name)
-				return
-			}
-			locations[location.Name] = loc
+			locations[location.Name] = *location
 			log.Infof("edgecdnxgeolookup: Updated Location %s", location.Name)
 		},
 		DeleteFunc: func(obj any) {

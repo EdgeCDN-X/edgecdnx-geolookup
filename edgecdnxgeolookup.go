@@ -137,9 +137,19 @@ func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, 
 	Cache string
 }) (infrastructurev1alpha1.NodeSpec, error) {
 	filteredNodes := make([]infrastructurev1alpha1.NodeSpec, 0)
+
+	if location.Spec.MaintenanceMode {
+		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Location %s is in maintenance mode", location.Name))
+		return infrastructurev1alpha1.NodeSpec{}, fmt.Errorf("Location %s is in maintenance mode", location.Name)
+	}
+
 	for _, node := range location.Spec.Nodes {
 		matches := true
 		if filters.Cache != "" && !slices.Contains(node.Caches, filters.Cache) {
+			matches = false
+		}
+
+		if node.MaintenanceMode {
 			matches = false
 		}
 

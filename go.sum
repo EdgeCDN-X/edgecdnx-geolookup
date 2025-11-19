@@ -1,6 +1,6 @@
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
-github.com/EdgeCDN-X/edgecdnx-controller v0.8.0 h1:cu4wUfUG78R+Fhgo1oN4ukgL8ezUu+p+8q2ZzuuEsyA=
-github.com/EdgeCDN-X/edgecdnx-controller v0.8.0/go.mod h1:TYJ49yGCUgJS83tUF5+HMyiBakBkcAHuF6qHmvO6rOQ=
+github.com/EdgeCDN-X/edgecdnx-controller v0.10.0 h1:qJNKRvZEPAW50uqMRY5t0F3oqO5dg28VF6oxOE5DfIA=
+github.com/EdgeCDN-X/edgecdnx-controller v0.10.0/go.mod h1:TYJ49yGCUgJS83tUF5+HMyiBakBkcAHuF6qHmvO6rOQ=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=

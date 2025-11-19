@@ -66,11 +66,16 @@ func (e EdgeCDNXGeolookup) GetCustomer(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("Service customer metadata module not initialized")
 }
 
-func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context) (string, error) {
+func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context, cache string) (string, error) {
 	maxValue := 0
 	locationScore := make(map[string]int)
 
 	for locationName, location := range e.Locations {
+		if slices.IndexFunc(location.Spec.NodeGroups, func(ng infrastructurev1alpha1.NodeGroupSpec) bool { return ng.Name == cache }) == -1 {
+			log.Debug(fmt.Sprintf("edgecdnxgeolookup: skipping location %s as it does not have node group for cache %s", locationName, cache))
+			continue
+		}
+
 		for attrName, attribute := range location.Spec.GeoLookup.Attributes {
 			if lookupFunc := metadata.ValueFunc(ctx, attrName); lookupFunc != nil {
 				if lookupValue := lookupFunc(); lookupValue != "" {
@@ -143,18 +148,15 @@ func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, 
 		return infrastructurev1alpha1.NodeSpec{}, fmt.Errorf("Location %s is in maintenance mode", location.Name)
 	}
 
-	for _, node := range location.Spec.Nodes {
-		matches := true
-		if filters.Cache != "" && !slices.Contains(node.Caches, filters.Cache) {
-			matches = false
-		}
-
-		if node.MaintenanceMode {
-			matches = false
-		}
-
-		if matches {
-			filteredNodes = append(filteredNodes, node)
+	// Add only nodes which are not in maintenance mode and match the cache filter
+	for _, ng := range location.Spec.NodeGroups {
+		if ng.Name == filters.Cache {
+			for _, node := range ng.Nodes {
+				if node.MaintenanceMode {
+					continue
+				}
+				filteredNodes = append(filteredNodes, node)
+			}
 		}
 	}
 
@@ -209,9 +211,15 @@ func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, 
 func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 
+	cache, err := e.GetServiceCache(ctx)
+	if err != nil {
+		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Cache not found - %v", err))
+		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
+	}
+
 	locationName, err := e.IsPrefixRouted(ctx)
 	if err != nil {
-		locationName, err = e.PerformGeoLookup(ctx)
+		locationName, err = e.PerformGeoLookup(ctx, cache)
 		if err != nil {
 			log.Debug(fmt.Sprintf("edgecdnxgeolookup: Location not found - %v", err))
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
@@ -228,12 +236,6 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 	}
 
 	log.Debug(fmt.Sprintf("edgecdnxgeolookup: Routing to location: %s\n", location.Name))
-
-	cache, err := e.GetServiceCache(ctx)
-	if err != nil {
-		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Cache not found - %v", err))
-		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
-	}
 
 	node, err := e.ApplyHash(&location, state.Name(), struct{ Cache string }{cache})
 	if err != nil {

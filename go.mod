@@ -3,7 +3,7 @@ module github.com/EdgeCDN-X/edgecdnx-geolookup
 go 1.24.4
 
 require (
-	github.com/EdgeCDN-X/edgecdnx-controller v0.8.0
+	github.com/EdgeCDN-X/edgecdnx-controller v0.10.0
 	github.com/coredns/caddy v1.1.2-0.20241029205200-8de985351a98
 	github.com/coredns/coredns v1.12.1
 	github.com/hashicorp/consul/api v1.32.1

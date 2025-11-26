@@ -23,7 +23,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
-	consulapi "github.com/hashicorp/consul/api"
 )
 
 // init registers this plugin.
@@ -39,9 +38,7 @@ func setup(c *caddy.Controller) error {
 	kubeconfig := ctrl.GetConfigOrDie()
 	c.Next() // plugin name
 
-	var namespace, consulEndpoint string
-	consulcachettl := time.Second * 30
-	consulcachecleanupinterval := time.Minute * 1
+	var namespace string
 	var recordttl uint32 = 60
 	locations := make(map[string]infrastructurev1alpha1.Location)
 
@@ -50,23 +47,6 @@ func setup(c *caddy.Controller) error {
 		args := c.RemainingArgs()
 		if val == "namespace" {
 			namespace = args[0]
-		}
-		if val == "consulEndpoint" {
-			consulEndpoint = args[0]
-		}
-		if val == "consulcachettl" {
-			persedttl, err := time.ParseDuration(args[0])
-			if err != nil {
-				return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to parse consulcachettl: %w", err))
-			}
-			consulcachettl = persedttl
-		}
-		if val == "consulcachecleanupinterval" {
-			parsedcleanup, err := time.ParseDuration(args[0])
-			if err != nil {
-				return plugin.Error("edgecdnxgeolookup", fmt.Errorf("failed to parse consulcachecleanupinterval: %w", err))
-			}
-			consulcachecleanupinterval = parsedcleanup
 		}
 		if val == "recordttl" {
 			raw, err := strconv.Atoi(args[0])
@@ -84,8 +64,8 @@ func setup(c *caddy.Controller) error {
 
 	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 10*time.Minute, namespace, nil)
 	informer := fac.ForResource(schema.GroupVersionResource{
-		Group:    infrastructurev1alpha1.GroupVersion.Group,
-		Version:  infrastructurev1alpha1.GroupVersion.Version,
+		Group:    infrastructurev1alpha1.SchemeGroupVersion.Group,
+		Version:  infrastructurev1alpha1.SchemeGroupVersion.Version,
 		Resource: "locations",
 	}).Informer()
 
@@ -169,29 +149,20 @@ func setup(c *caddy.Controller) error {
 	factoryCloseChan := make(chan struct{})
 	fac.Start(factoryCloseChan)
 
-	consulCache := NewCache[bool](consulcachettl, consulcachecleanupinterval)
-
 	c.OnShutdown(func() error {
 		log.Infof("edgecdnxgeolookup: Shutting down informer")
 		close(factoryCloseChan)
 		fac.Shutdown()
-		consulCache.Stop()
 		return nil
 	})
-
-	consulConfig := consulapi.DefaultConfig()
-	consulConfig.Address = consulEndpoint
-	consulClient, err := consulapi.NewClient(consulConfig)
 
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
 		return EdgeCDNXGeolookup{Next: next,
-			Locations:         locations,
-			Sync:              sem,
-			InformerSynced:    informer.HasSynced,
-			ConsulClient:      consulClient,
-			ConsulHealthCache: consulCache,
-			Ttl:               recordttl,
+			Locations:      locations,
+			Sync:           sem,
+			InformerSynced: informer.HasSynced,
+			Ttl:            recordttl,
 		}
 	})
 

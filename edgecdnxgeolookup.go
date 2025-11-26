@@ -18,19 +18,21 @@ import (
 	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
-	consulapi "github.com/hashicorp/consul/api"
 	"github.com/miekg/dns"
 )
 
 // Example is an example plugin to show how to write a plugin.
 type EdgeCDNXGeolookup struct {
-	Next              plugin.Handler
-	Locations         map[string]infrastructurev1alpha1.Location
-	Sync              *sync.RWMutex
-	InformerSynced    func() bool
-	ConsulClient      *consulapi.Client
-	ConsulHealthCache *Cache[bool]
-	Ttl               uint32
+	Next           plugin.Handler
+	Locations      map[string]infrastructurev1alpha1.Location
+	Sync           *sync.RWMutex
+	InformerSynced func() bool
+	Ttl            uint32
+}
+
+type HashFilters struct {
+	Cache string
+	Qtype uint16
 }
 
 type EdgeCDNXGeolookupResponseWriter struct {
@@ -138,9 +140,7 @@ func (e EdgeCDNXGeolookup) PerformGeoLookup(ctx context.Context, cache string) (
 	return "", errors.New("No Location Found")
 }
 
-func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, hashInput string, filters struct {
-	Cache string
-}) (infrastructurev1alpha1.NodeSpec, error) {
+func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, hashInput string, filters HashFilters) (infrastructurev1alpha1.NodeSpec, error) {
 	filteredNodes := make([]infrastructurev1alpha1.NodeSpec, 0)
 
 	if location.Spec.MaintenanceMode {
@@ -169,38 +169,33 @@ func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, 
 		lastFourBytes := hash[len(hash)-4:]
 		hashValue := uint32(lastFourBytes[0])<<24 | uint32(lastFourBytes[1])<<16 | uint32(lastFourBytes[2])<<8 | uint32(lastFourBytes[3])
 		nodeIndex := int(hashValue % uint32(len(filteredNodes)))
+		nodeName := filteredNodes[nodeIndex].Name
 
-		nodeName := fmt.Sprintf("%s.%s.edgecdnx.com", filteredNodes[nodeIndex].Name, location.Name)
-
-		cacheService := fmt.Sprintf("cache-%s", nodeName)
-		healthy, ok := e.ConsulHealthCache.Get(cacheService)
-
-		if !ok {
-			health, _, err := e.ConsulClient.Health().Service(cacheService, "", false, &consulapi.QueryOptions{
-				UseCache:   true,
-				AllowStale: true,
-			})
-
-			if err != nil {
-				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Error fetching health for node %s - %v", nodeName, err))
-			}
-
-			healthy = true
-			for _, check := range health {
-				if check.Checks.AggregatedStatus() != consulapi.HealthPassing {
-					log.Debugf("edgecdnxgeolookup: Node %s is not healthy, trying next node", nodeName)
-					filteredNodes = slices.Delete(filteredNodes, nodeIndex, nodeIndex+1)
-					healthy = false
-				}
-			}
-			log.Debugf("edgecdnxgeolookup: cache miss: %s - %v", cacheService, healthy)
-			e.ConsulHealthCache.Set(cacheService, healthy)
-		} else {
-			log.Debugf("edgecdnxgeolookup: cache hit: %s - %v", cacheService, healthy)
+		nodeStatus, exists := location.Status.NodeStatus[nodeName] // Access to ensure node status exists
+		if !exists {
+			log.Debug(fmt.Sprintf("edgecdnxgeolookup: Node %s has no status, assuming healthy", nodeName))
+			return filteredNodes[nodeIndex], nil
 		}
 
-		if healthy {
-			log.Debugf("edgecdnxgeolookup: Node %s is healthy, returning node", nodeName)
+		if idx := slices.IndexFunc(nodeStatus.Conditions, func(c infrastructurev1alpha1.NodeCondition) bool {
+			switch filters.Qtype {
+			case dns.TypeA:
+				return c.Type == infrastructurev1alpha1.IPV4HealthCheckSuccessful
+			case dns.TypeAAAA:
+				return c.Type == infrastructurev1alpha1.IPV6HealthCheckSuccessful
+			default:
+				return false
+			}
+		}); idx != -1 {
+			condition := nodeStatus.Conditions[idx]
+			if !condition.Status {
+				log.Debugf("edgecdnxgeolookup: Node %s is not healthy for qtype %d, trying next node", nodeName, filters.Qtype)
+				filteredNodes = slices.Delete(filteredNodes, nodeIndex, nodeIndex+1)
+				continue
+			}
+			return filteredNodes[nodeIndex], nil
+		} else {
+			log.Debugf("edgecdnxgeolookup: Node %s has no health check condition for qtype %d, assuming healthy", nodeName, filters.Qtype)
 			return filteredNodes[nodeIndex], nil
 		}
 	}
@@ -237,7 +232,12 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 
 	log.Debug(fmt.Sprintf("edgecdnxgeolookup: Routing to location: %s\n", location.Name))
 
-	node, err := e.ApplyHash(&location, state.Name(), struct{ Cache string }{cache})
+	filter := HashFilters{
+		Cache: cache,
+		Qtype: state.Req.Question[0].Qtype,
+	}
+
+	node, err := e.ApplyHash(&location, state.Name(), filter)
 	if err != nil {
 		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Hashing error - %v", err))
 
@@ -249,7 +249,7 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 				continue
 			}
 
-			node, err = e.ApplyHash(&fbLocation, state.Name(), struct{ Cache string }{cache})
+			node, err = e.ApplyHash(&fbLocation, state.Name(), filter)
 			if err == nil {
 				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Fallback to location %s successful", fbLoc))
 				break
@@ -279,13 +279,15 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 
 	log.Debug(fmt.Sprintf("edgecdnxgeolookup: srcIP %s", srcIP))
 
-	if srcIP.To4() != nil {
+	if state.Req.Question[0].Qtype == dns.TypeA {
 		res := new(dns.A)
 		res.Hdr = dns.RR_Header{Name: state.Name(), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: e.Ttl}
 		parsed := net.ParseIP(node.Ipv4)
 		res.A = parsed
 		m.Answer = append(m.Answer, res)
-	} else {
+	}
+
+	if state.Req.Question[0].Qtype == dns.TypeAAAA {
 		res := new(dns.AAAA)
 		res.Hdr = dns.RR_Header{Name: state.Name(), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: e.Ttl}
 		parsed := net.ParseIP(node.Ipv6)

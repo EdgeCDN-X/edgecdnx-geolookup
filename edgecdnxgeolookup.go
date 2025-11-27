@@ -48,7 +48,7 @@ func (e EdgeCDNXGeolookup) IsPrefixRouted(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("Prefixlist metadata module not initialized")
 }
 
-func (e EdgeCDNXGeolookup) GetServiceCache(ctx context.Context) (string, error) {
+func (e EdgeCDNXGeolookup) GetServiceCacheType(ctx context.Context) (string, error) {
 	if cacheFunc := metadata.ValueFunc(ctx, "edgecdnxservices/cache"); cacheFunc != nil {
 		if serviceCache := cacheFunc(); serviceCache != "" {
 			return serviceCache, nil
@@ -201,22 +201,50 @@ func (e EdgeCDNXGeolookup) ApplyHash(location *infrastructurev1alpha1.Location, 
 	}
 }
 
+func (e EdgeCDNXGeolookup) HasCacheType(location *infrastructurev1alpha1.Location, cache string) error {
+	for _, ng := range location.Spec.NodeGroups {
+		if ng.Name == cache {
+			return nil
+		}
+	}
+	return fmt.Errorf("Cache type %s not found in location %s", cache, location.Name)
+}
+
 // ServeDNS implements the plugin.Handler interface. This method gets called when example is used
 // in a Server.
 func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 
-	cache, err := e.GetServiceCache(ctx)
+	cache, err := e.GetServiceCacheType(ctx)
 	if err != nil {
 		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Cache not found - %v", err))
 		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 	}
 
 	locationName, err := e.IsPrefixRouted(ctx)
+
+	if err == nil {
+		// If prefix routed, verify that the location has the required cache type
+		e.Sync.RLock()
+		location, ok := e.Locations[locationName]
+		e.Sync.RUnlock()
+		if !ok {
+			log.Error(fmt.Sprintf("edgecdnxgeolookup: Prefix routed location not found - %v", err))
+			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
+		}
+
+		// Verify cache type exists in location
+		err = e.HasCacheType(&location, cache)
+		if err != nil {
+			log.Error(fmt.Sprintf("edgecdnxgeolookup: Cache type %s not found in prefix routed location %s - %v. Falling back to GeoLookup", cache, locationName, err))
+		}
+	}
+
+	// If not prefix routed or cache type not found in prefix routed location, perform geo lookup
 	if err != nil {
 		locationName, err = e.PerformGeoLookup(ctx, cache)
 		if err != nil {
-			log.Debug(fmt.Sprintf("edgecdnxgeolookup: Location not found - %v", err))
+			log.Error(fmt.Sprintf("edgecdnxgeolookup: Location not found - %v", err))
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 		}
 	}
@@ -226,7 +254,7 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 
 	location, ok := e.Locations[locationName]
 	if !ok {
-		log.Debug(fmt.Sprintf("edgecdnxgeolookup: Location not found - %v", err))
+		log.Error(fmt.Sprintf("edgecdnxgeolookup: Location not found - %v", err))
 		return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 	}
 
@@ -245,7 +273,7 @@ func (e EdgeCDNXGeolookup) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 			fbLocation, ok := e.Locations[fbLoc]
 			log.Debug(fmt.Sprintf("edgecdnxgeolookup: Falling back to location %s", fbLoc))
 			if !ok {
-				log.Debug(fmt.Sprintf("edgecdnxgeolookup: Fallback location %s not found", fbLoc))
+				log.Error(fmt.Sprintf("edgecdnxgeolookup: Fallback location %s not found", fbLoc))
 				continue
 			}
 
